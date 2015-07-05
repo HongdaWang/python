@@ -2,7 +2,7 @@
 #encoding=utf-8
 
 '''
-Date: 2015-4-8
+Date: 2015-5-16
 Author: HD
 Email: wanghongda7606@126.com
 '''
@@ -10,52 +10,27 @@ Email: wanghongda7606@126.com
 import os
 import sys
 import re
+import subprocess
+from subprocess import Popen, PIPE
 from fabric.colors import *
 from fabric.api import *
 
 env.user = 'root'
 env.password = '123456'
-env.hosts = ['10.10.10.10']
+env.roledefs = {             #define servers ip
+    'loginservers': ['10.10.10.11'],
+    'logicservers': ['10.10.10.10']
+}
+env.RDS = 'test.mysql.rds.aliyuncs.com'
+env.accesskeyid = 'abcdef'
+env.accesskeysecret = '111111'
 
-env.package_dir = 'zabbix_agent'
-env.logical_dir = 'logical'
-env.login_dir = 'login'
-env.remote_path = '/home/install/'
-env.zabbix_agent_path = '/usr/local/zabbix_agent/'
-
-def check_ip(ip):
-    addr = ip.strip().split('.')
-    print addr
-    if len(addr) != 4:
-        print '%s is invalid!' % ip
-        sys.exit()
-    for i in range(4):
-        try:
-            addr[i] = int(addr[i])
-        except:
-            print '%s is invalid! ip is not int' % ip
-            sys.exit()
-        if addr[i] <= 254 and addr[i] >= 0:
-            pass
-        else:
-            print '%s is invalid! ip is not in 0-254' % ip
-            sys.exit()
-        i+=1
-    else:
-        return True
-
-def update_file(type):
-    path = './' + type + '/zabbix_agentd.conf'
-    new_name = prompt('Please input hostname:', default='')
-    if new_name == '':
-        print 'error: Hostname is invalid!'
-        sys.exit()
+def update_file(new_ip, path):
     if os.path.exists(path):
         try:
             fopen = open(path)
             fread = fopen.read()
-            old_name = re.findall(r'Hostname=(\S+)\n', fread)[0]
-            data = re.sub(old_name, new_name, fread)
+            data = re.sub(r'\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b', new_ip, fread)
         finally:
             fopen.close()
         try:
@@ -67,51 +42,151 @@ def update_file(type):
         print 'File %s is not exists!'
         sys.exit()
 
-def install():
-    print yellow('Start put package...')
-    with settings(warn_only = True):
-        run('mkdir -p %s' % (env.remote_path))
-    with settings(warn_only = True):
-        result = put(env.package_dir, env.remote_path)
-    if result.failed and no ('Put %s to %s failed, Continue[Y/N]?' % (env.package_dir, env.remote_path)):
-        abort('Aborting task!')
-    with cd(env.remote_path + env.package_dir):
-        run('sh install.sh')
-    print green('Install Zabbix_agent success!')
-
-@task
-def logic():
-    install()
-    print yellow('Start configure zabbix_agent of logical server...')
-
-    with settings(warn_only = True):
-        result = put(env.logical_dir + '/scripts', env.zabbix_agent_path)
-    if result.failed and no ('Put %s to %s failed, Continue[Y/N]?' % (env.logical_dir + '/scripts', env.zabbix_agent_path)):
-        abort('Aborting task!')
-
-    update_file('logical')
-    with cd(env.zabbix_agent_path + 'etc'):
-        run('mv zabbix_agentd.conf zabbix_agentd.conf.bak')
-    with settings(warn_only = True):
-        result = put(env.logical_dir + '/zabbix_agentd.conf', env.zabbix_agent_path + 'etc')
-    if result.failed and no ('Put %s to %s failed, Continue[Y/N]?' % (env.logical_dir + '/zabbix_agentd.conf', env.zabbix_agent_path + 'etc')):
-        abort('Aborting task!')
-    else:
-        run('service zabbix_agentd start')
-        print green('Configure logical-server success!')
-
-@task
+@roles('loginservers')
 def login():
-    install()
-    print yellow('Start configure zabbix_agent of login server...')
+    print yellow('Starting LOGIN task...')
 
-    update_file('login')
-    with cd(env.zabbix_agent_path + 'etc'):
-        run('mv zabbix_agentd.conf zabbix_agentd.conf.bak')
-    with settings(warn_only = True):
-        result = put(env.login_dir + '/zabbix_agentd.conf', env.zabbix_agent_path + 'etc')
-    if result.failed and no ('Put %s to %s failed, Continue[Y/N]?' % (env.login_dir + '/zabbix_agentd.conf', env.zabbix_agent_path + 'etc')):
+#Initializing system environment
+
+    print yellow('Initializing system environment...')
+
+    result = put('./login/aliwww.tar.gz', '~/')
+    if result.failed and no ('Put package failed, Continue[Y/N]?'):
         abort('Aborting task!')
     else:
-        run('service zabbix_agentd start')
-        print green('Configure login-server success!')
+        with cd('~/'):
+            run('tar -zxvf aliwww.tar.gz')
+        with cd('~/sh-1.4.1'):
+            run('sh ./install.sh')
+
+    with settings(warn_only = True):
+        result = put('./login/node-v0.12.2.tar.gz', '~/')
+    if result.failed and no ('Put package failed, Continue[Y/N]?'):
+        abort('Aborting task!')
+    else:
+        with cd('~/'):
+            run('tar -zxvf node-v0.12.2.tar.gz')
+    with cd('~/node-v0.12.2'):
+        run('./configure')
+        run('make && make install')
+
+    print green('Initializing system environment Done!')
+
+#configure config.inc
+
+    env.logic_in_ip = get_ip(ifname = 'eth0')
+    update_file(env.logic_in_ip, path = './login/yunhai/config.inc')
+    old_RDS = subprocess.Popen(''' cat ./login/yunhai/config.inc|grep db_config|awk -F "'" '{print $4}'|tr -d '\n' ''', stdout = PIPE, shell = True).stdout.read()
+    with hide('warnings', 'running', 'stdout', 'stderr'):
+        local(' sed -i "s/%s/%s/g" ./login/yunhai/config.inc ' % (old_RDS, env.RDS))
+
+#configure CreateDatebase.php
+
+    old_accesskeyid = subprocess.Popen(''' cat ./login/yunhai/aliyun/CreateDatabase.php |grep accessKeyId|awk -F '"' '{print $2}'|tr -d '\n' ''', stdout = PIPE, shell = True).stdout.read()
+    old_accesskeysecret = subprocess.Popen(''' cat ./login/yunhai/aliyun/CreateDatabase.php |grep accessKeySecret|awk -F '"' '{print $2}'|tr -d '\n' ''', stdout = PIPE, shell = True).stdout.read()
+    with hide('warnings', 'running', 'stdout', 'stderr'):
+        local(' sed -i "s/%s/%s/g" ./login/yunhai/aliyun/CreateDatabase.php ' % (old_accesskeyid, env.accesskeyid))
+        local(' sed -i "s/%s/%s/g" ./login/yunhai/aliyun/CreateDatabase.php ' % (old_accesskeysecret, env.accesskeysecret))
+
+#configure db_config.sh
+
+    old_RDS = subprocess.Popen(''' cat ./login/aliyun_sql/db_config.sh|grep host|awk -F '=' '{print $2}'|tr -d '\n' ''', stdout = PIPE, shell = True).stdout.read()
+    with hide('warnings', 'running', 'stdout', 'stderr'):
+        local(' sed -i "s/%s/%s/g" ./login/aliyun_sql/db_config.sh ' % (old_RDS, env.RDS))
+
+#put packages
+
+    with lcd('/task/yhxz/login'):
+        local('tar -zcvf yunhai.tar.gz ./yunhai')
+    with settings(warn_only = True):
+        result = put('./login/yunhai.tar.gz', '/alidata/www')
+    if result.failed and no ('Put package failed, Continue[Y/N]?'):
+        abort('Aborting task!')
+    else:
+        with cd('/alidata/www'):
+            run('tar -zxvf yunhai.tar.gz')
+
+    with lcd('/task/yhxz/login'):
+        local('tar -zcvf aliyun_sql.tar.gz ./aliyun_sql')
+    with settings(warn_only = True):
+        result = put('./login/aliyun_sql.tar.gz', '~/')
+    if result.failed and no ('Put package failed, Continue[Y/N]?'):
+        abort('Aborting task!')
+    else:
+        with cd('~/'):
+            run('tar -zxvf aliyun_sql.tar.gz')
+
+    with settings(warn_only = True):
+        result = put('./login/yunhai.conf', '/alidata/server/nginx/conf/vhosts')
+    if result.failed and no ('Put package failed, Continue[Y/N]?'):
+        abort('Aborting task!')
+    else:
+        run('/etc/init.d/nginx restart')
+
+    print yellow('Cleaning up...')
+
+    local('rm -rfv ./login/yunhai.tar.gz')
+    local('rm -rfv ./login/aliyun_sql.tar.gz')
+    with cd('/alidata/www'):
+        run('rm -rfv yunhai.tar.gz')
+    with cd('~/'):
+        run('rm -rfv aliyun_sql.tar.gz')
+        run('rm -rfv node-v0.12.2')
+        run('rm -rfv node-v0.12.2.tar.gz')
+
+    print green('LOGIN task Done!')
+
+@roles('logicservers')
+def get_ip(ifname):
+    ip = run(''' ifconfig %s|grep 'inet addr:'|awk -F ' ' '{print $2}'|awk -F ':' '{print $2}'|tr -d '\n' ''' % ifname)
+    return ip
+
+@roles('logicservers')
+def logic():
+    print yellow('Starting LOGIC task...')
+    with hide('running', 'stdout', 'stderr'):
+        env.logic_in_ip = get_ip(ifname = 'eth0')
+        env.logic_ex_ip = get_ip(ifname = 'eth1')
+
+
+#configure DB
+
+    update_file(env.logic_in_ip, path = './logic/yunhai/DB/etc/bind.conf')
+    old_RDS = subprocess.Popen(''' cat ./logic/yunhai/DB/etc/bench.conf |grep DB_IP|awk -F ' ' '{print $2}'|tr -d '\n' ''', stdout = PIPE, shell = True).stdout.read()
+    with hide('warnings', 'running', 'stdout', 'stderr'):
+        local(' sed -i "s/%s/%s/g" ./logic/yunhai/DB/etc/bench.conf ' % (old_RDS, env.RDS))
+    print green('Configure DB OK!')
+
+#configure gateway
+
+    update_file(env.logic_in_ip, path = './logic/yunhai/gateway/etc/bind.conf')
+    update_file(env.logic_in_ip, path = './logic/yunhai/gateway/etc/bench.conf')
+    print green('Configure Gateway OK!')
+
+#configure online
+
+    update_file(env.logic_ex_ip, path = './logic/yunhai/online/etc/bind.conf')
+    update_file(env.logic_in_ip, path = './logic/yunhai/online/etc/bench.conf')
+    print green('Configure Online OK!')
+
+#configure proxy
+
+    update_file(env.logic_in_ip, path = './logic/yunhai/proxy/etc/bind.conf')
+    update_file(env.logic_in_ip, path = './logic/yunhai/proxy/etc/route.xml')
+    print green('Configure Proxy OK!')
+
+#put files
+
+    with lcd('/task/yhxz/logic'):
+        local('tar -zcvf yunhai.tar.gz ./yunhai')
+    with settings(warn_only = True):
+        run('mkdir -p /alidata')
+        result = put('./logic/yunhai.tar.gz', '/alidata')
+    if result.failed and no ('Put package failed, Continue[Y/N]?'):
+        abort('Aborting task!')
+    else:
+        local('rm -rfv ./logic/yunhai.tar.gz')
+    with cd('/alidata'):
+        run('tar -zxvf yunhai.tar.gz')
+        run('rm -rfv yunhai.tar.gz')
+    print green('LOGIC task Done!')
